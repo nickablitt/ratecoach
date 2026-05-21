@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>rate coach</title>
+    
+    <!-- standalone app meta tags -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#000000">
+
+    <!-- pwa manifest + icon -->
+    <link rel="manifest" href="./manifest.json">
+    <link rel="apple-touch-icon" href="./icon-192.png">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@700&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #000000;
+            --surface: #0a0a0a;
+            --accent: #22d3ee;
+            --text: #ffffff;
+            --text-dim: #52525b;
+        }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+        }
+        .font-mono { font-family: 'Roboto Mono', monospace; }
+        .lowercase { text-transform: lowercase; }
+        
+        #app-window {
+            width: 100%;
+            max-width: 420px;
+            height: 100%;
+            max-height: 800px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            background: var(--bg);
+        }
+
+        .main-tap-zone {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            border: 2px solid #18181b;
+            border-radius: 3rem;
+            margin: 1rem 0;
+            transition: background-color 0.05s, transform 0.05s;
+        }
+        .main-tap-zone:active {
+            background-color: #0f172a;
+            transform: scale(0.99);
+        }
+        .main-tap-zone.recording { border-color: #164e63; }
+
+        .btn {
+            padding: 1.25rem;
+            border-radius: 1.25rem;
+            font-weight: 700;
+            text-align: center;
+            transition: opacity 0.1s;
+        }
+        .btn:active { opacity: 0.7; }
+        .btn-primary { background: var(--accent); color: #000; }
+        .btn-dark { background: #18181b; color: #fff; }
+        .btn-danger { background: #450a0a; color: #f87171; }
+
+        .custom-scroll::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body>
+    <div id="app-window"></div>
+
+    <script>
+        // --- service worker registration (required for pwa install on android) ---
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .catch(e => console.log('SW registration failed:', e));
+            });
+        }
+
+        // --- state ---
+        let appState = {
+            view: 'splash',
+            sessions: [],
+            active: {
+                recording: false,
+                start: null,
+                total: 0,
+                lapStart: 0,
+                multiplier: 1,
+                rate: 0,
+                logs: [], 
+                splits: []
+            },
+            selected: null,
+            interval: null,
+            lastTap: null
+        };
+
+        // --- db ---
+        let db;
+        const initDB = () => {
+            const req = indexedDB.open("RateCoachV4", 1);
+            req.onupgradeneeded = (e) => {
+                e.target.result.createObjectStore("sessions", { keyPath: "id", autoIncrement: true });
+            };
+            req.onsuccess = (e) => {
+                db = e.target.result;
+                loadSessions();
+            };
+        };
+
+        const loadSessions = () => {
+            const store = db.transaction("sessions", "readonly").objectStore("sessions");
+            const req = store.getAll();
+            req.onsuccess = () => {
+                appState.sessions = req.result.sort((a, b) => b.id - a.id);
+                render();
+            };
+        };
+
+        const saveToDB = (name) => {
+            const session = {
+                name: name || `session ${new Date().toLocaleDateString()}`,
+                date: new Date().toISOString(),
+                total: appState.active.total,
+                avgRate: appState.active.logs.reduce((a, b) => a + b.rate, 0) / appState.active.logs.length,
+                logs: appState.active.logs,
+                splits: appState.active.splits
+            };
+            const tx = db.transaction("sessions", "readwrite");
+            tx.objectStore("sessions").add(session);
+            tx.oncomplete = () => {
+                loadSessions();
+                resetSession();
+                appState.view = 'main';
+                render();
+            };
+        };
+
+        const deleteFromDB = (id) => {
+            const tx = db.transaction("sessions", "readwrite");
+            tx.objectStore("sessions").delete(id);
+            tx.oncomplete = () => {
+                loadSessions();
+                appState.view = 'recall';
+                render();
+            };
+        };
+
+        // --- logic ---
+        const format = (ms) => {
+            const m = Math.floor(ms / 60000);
+            const s = Math.floor((ms % 60000) / 1000);
+            const cs = Math.floor((ms % 1000) / 10);
+            return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+        };
+
+        const resetSession = () => {
+            clearInterval(appState.interval);
+            appState.active = { ...appState.active, recording: false, total: 0, lapStart: 0, rate: 0, logs: [], splits: [] };
+            appState.lastTap = null;
+        };
+
+        const start = () => {
+            resetSession();
+            appState.active.recording = true;
+            const now = Date.now();
+            appState.active.start = now;
+            render(); 
+
+            appState.interval = setInterval(() => {
+                appState.active.total = Date.now() - now;
+                const totalDisplay = document.getElementById('total-timer-display');
+                const lapDisplay = document.getElementById('lap-timer-display');
+                if (totalDisplay) totalDisplay.textContent = format(appState.active.total);
+                if (lapDisplay) lapDisplay.textContent = format(appState.active.total - appState.active.lapStart);
+            }, 50);
+        };
+
+        const stop = () => {
+            clearInterval(appState.interval);
+            appState.active.recording = false;
+            appState.view = appState.active.logs.length > 0 ? 'save' : 'main';
+            render();
+        };
+
+        const tap = () => {
+            if (!appState.active.recording) return;
+            const now = Date.now();
+            if (appState.lastTap) {
+                const delta = now - appState.lastTap;
+                const r = (60000 / delta) * appState.active.multiplier;
+                appState.active.rate = r;
+                appState.active.logs.push({ rate: r, time: appState.active.total });
+            }
+            appState.lastTap = now;
+            render();
+        };
+
+        const split = () => {
+            if (!appState.active.recording) return;
+            appState.active.splits.push(appState.active.total);
+            appState.active.lapStart = appState.active.total;
+            render();
+        };
+
+        // --- render ---
+        const render = () => {
+            const ui = document.getElementById('app-window');
+            ui.innerHTML = '';
+
+            if (appState.view === 'splash') {
+                ui.innerHTML = `<div class="flex flex-col items-center justify-center h-full text-cyan-400 font-mono">
+                    <h1 class="text-4xl font-bold lowercase tracking-tighter animate-pulse">rate coach</h1>
+                    <p class="text-[10px] text-zinc-700 mt-2 lowercase">ablitt & jenkin 2026</p>
+                </div>`;
+                setTimeout(() => { if(appState.view === 'splash'){appState.view = 'main'; render();} }, 1500);
+                return;
+            }
+
+            if (appState.view === 'main') {
+                const a = appState.active;
+                ui.innerHTML = `<div class="flex flex-col h-full p-6">
+                    <div class="flex justify-between items-start mb-4">
+                        <div class="flex flex-col">
+                            <span class="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">spm</span>
+                            <div class="text-7xl font-bold text-cyan-400 font-mono tracking-tighter">
+                                ${a.rate > 0 ? a.rate.toFixed(1) : "0.0"}
+                            </div>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">lap</span>
+                            <div id="lap-timer-display" class="text-2xl text-white font-mono font-bold">${format(a.total - a.lapStart)}</div>
+                        </div>
+                    </div>
+
+                    <div id="tap-target" class="main-tap-zone ${a.recording ? 'recording' : ''}">
+                        <span class="text-[10px] text-zinc-600 font-bold uppercase tracking-widest mb-4">total session time</span>
+                        <div id="total-timer-display" class="text-6xl font-bold text-white font-mono tracking-tighter">${format(a.total)}</div>
+                        <p class="text-[10px] text-zinc-800 mt-8 lowercase">${a.recording ? `sample: every ${a.multiplier} strokes` : 'press start to begin'}</p>
+                    </div>
+
+                    <div class="flex flex-col gap-4 mt-4">
+                        <div class="flex justify-between items-center bg-zinc-950 p-2 rounded-2xl border border-zinc-900">
+                            <span class="text-[9px] text-zinc-500 px-3 font-bold uppercase">strokes per tap</span>
+                            <div class="flex gap-1">
+                                ${[1, 2, 3].map(n => `<button onclick="setMult(${n})" ${a.recording?'disabled':''} class="w-12 h-12 rounded-xl text-sm font-bold transition-colors ${a.multiplier===n?'bg-cyan-500 text-black':'bg-zinc-900 text-zinc-500'}">${n}</button>`).join('')}
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            ${a.recording ? 
+                                `<button onclick="split()" class="btn btn-dark lowercase">split</button><button onclick="stop()" class="btn btn-danger lowercase">stop</button>` :
+                                `<button onclick="start()" class="btn btn-primary lowercase">start</button><button onclick="setView('recall')" class="btn btn-dark lowercase">recall</button>`
+                            }
+                        </div>
+                    </div>
+                </div>`;
+                document.getElementById('tap-target').onclick = tap;
+            }
+
+            if (appState.view === 'recall') {
+                ui.innerHTML = `<div class="flex flex-col h-full p-6">
+                    <h2 class="text-cyan-400 text-xs font-bold tracking-widest lowercase border-b border-zinc-900 pb-3 mb-6">recorded sessions</h2>
+                    <div class="flex-grow overflow-y-auto custom-scroll space-y-2">
+                        ${appState.sessions.length === 0 ? '<div class="h-full flex items-center justify-center text-zinc-800 text-xs lowercase italic">no logs found</div>' : ''}
+                        ${appState.sessions.map(s => `<div onclick="detail(${s.id})" class="p-4 bg-zinc-950 border border-zinc-900 rounded-2xl flex justify-between items-center active:bg-zinc-900">
+                            <div>
+                                <div class="text-sm font-bold text-zinc-200">${s.name}</div>
+                                <div class="text-[9px] text-zinc-600 font-bold uppercase mt-1">${new Date(s.date).toLocaleDateString()}</div>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-xl font-bold text-cyan-400 font-mono">${s.avgRate.toFixed(1)}</div>
+                                <div class="text-[8px] text-zinc-700 font-bold uppercase">avg spm</div>
+                            </div>
+                        </div>`).join('')}
+                    </div>
+                    <button onclick="setView('main')" class="mt-6 btn btn-dark lowercase">back</button>
+                </div>`;
+            }
+
+            if (appState.view === 'detail' && appState.selected) {
+                const s = appState.selected;
+                ui.innerHTML = `<div class="flex flex-col h-full p-6">
+                    <h2 class="text-cyan-400 text-xs font-bold tracking-widest lowercase border-b border-zinc-900 pb-3 mb-6">session analysis</h2>
+                    <div class="flex-grow overflow-y-auto custom-scroll space-y-6">
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="bg-zinc-950 p-4 rounded-2xl border border-zinc-900">
+                                <span class="text-[9px] text-zinc-600 font-bold uppercase block mb-1">duration</span>
+                                <span class="text-xl font-bold text-white font-mono">${format(s.total)}</span>
+                            </div>
+                            <div class="bg-zinc-950 p-4 rounded-2xl border border-zinc-900">
+                                <span class="text-[9px] text-zinc-600 font-bold uppercase block mb-1">avg rate</span>
+                                <span class="text-xl font-bold text-cyan-400 font-mono">${s.avgRate.toFixed(1)}</span>
+                            </div>
+                        </div>
+                        <canvas id="chart" class="w-full h-44 bg-black rounded-2xl border border-zinc-900"></canvas>
+                        <div>
+                            <span class="text-[10px] text-zinc-600 font-bold uppercase block mb-3 tracking-widest">split markers</span>
+                            <div class="space-y-1">
+                                ${s.splits.map((t, i) => `<div class="flex justify-between text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-zinc-600 lowercase">marker ${i+1}</span><span class="text-white">${format(t)}</span></div>`).join('')}
+                                ${s.splits.length === 0 ? '<span class="text-zinc-800 italic text-[10px] lowercase">no splits marked</span>' : ''}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-6 grid grid-cols-2 gap-3">
+                        <button onclick="setView('recall')" class="btn btn-dark lowercase">back</button>
+                        <button onclick="del(${s.id})" class="btn btn-danger lowercase text-sm">delete</button>
+                    </div>
+                </div>`;
+                setTimeout(() => draw(s), 10);
+            }
+
+            if (appState.view === 'save') {
+                ui.innerHTML = `<div class="flex flex-col h-full p-8 items-center justify-center text-center">
+                    <div class="w-20 h-20 bg-cyan-950/20 rounded-full flex items-center justify-center mb-8 border border-cyan-900/20">
+                        <svg class="w-10 h-10 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                    </div>
+                    <h2 class="text-white text-2xl font-bold lowercase mb-2">session ended</h2>
+                    <p class="text-zinc-600 text-xs mb-10 lowercase">enter a name to save this log</p>
+                    <input id="session-name" type="text" class="w-full bg-zinc-950 border border-zinc-800 rounded-2xl p-5 text-white text-center text-xl font-bold mb-8 focus:border-cyan-500 outline-none" placeholder="session name">
+                    <div class="grid grid-cols-2 gap-3 w-full">
+                        <button onclick="setView('main')" class="btn btn-dark lowercase">discard</button>
+                        <button onclick="saveToDB(document.getElementById('session-name').value)" class="btn btn-primary lowercase">save</button>
+                    </div>
+                </div>`;
+            }
+        };
+
+        const draw = (s) => {
+            const canvas = document.getElementById('chart');
+            if(!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+            const b = canvas.getBoundingClientRect();
+            canvas.width = b.width * dpr; canvas.height = b.height * dpr;
+            ctx.scale(dpr, dpr);
+            const w = b.width, h = b.height, p = 30;
+
+            if(s.logs.length < 2) return;
+            const rates = s.logs.map(l => l.rate);
+            const max = Math.max(...rates, 50), min = Math.min(...rates, 10), range = max - min;
+            const tRange = s.total || 1;
+            const getX = (t) => p + (t / tRange) * (w - p * 2);
+            const getY = (r) => h - p - ((r - min) / (range || 1)) * (h - p * 2);
+
+            ctx.strokeStyle = 'rgba(255, 255, 0, 0.15)';
+            s.splits.forEach(t => { ctx.beginPath(); ctx.moveTo(getX(t), p); ctx.lineTo(getX(t), h - p); ctx.stroke(); });
+            ctx.strokeStyle = '#111';
+            [0, 0.5, 1].forEach(v => { const y = p + v*(h-p*2); ctx.beginPath(); ctx.moveTo(p, y); ctx.lineTo(w-p, y); ctx.stroke(); });
+            ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 2;
+            ctx.beginPath();
+            s.logs.forEach((l, i) => { if(i===0) ctx.moveTo(getX(l.time), getY(l.rate)); else ctx.lineTo(getX(l.time), getY(l.rate)); });
+            ctx.stroke();
+        };
+
+        // --- global ---
+        window.setView = (v) => { appState.view = v; render(); };
+        window.setMult = (n) => { appState.active.multiplier = n; render(); };
+        window.detail = (id) => { appState.selected = appState.sessions.find(s => s.id === id); appState.view = 'detail'; render(); };
+        window.del = (id) => { if(confirm("delete record?")) deleteFromDB(id); };
+        window.start = start; window.stop = stop; window.split = split;
+
+        initDB();
+        render();
+    </script>
+</body>
+</html>
