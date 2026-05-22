@@ -204,13 +204,14 @@
         };
 
         const tap = () => {
-            if (!appState.active.recording) return;
             const now = Date.now();
             if (appState.lastTap) {
                 const delta = now - appState.lastTap;
                 const r = (60000 / delta) * appState.active.multiplier;
                 appState.active.rate = r;
-                appState.active.logs.push({ rate: r, time: appState.active.total });
+                if (appState.active.recording) {
+                    appState.active.logs.push({ rate: r, time: appState.active.total });
+                }
             }
             appState.lastTap = now;
             render();
@@ -263,7 +264,7 @@
                         <div class="flex justify-between items-center bg-zinc-950 p-2 rounded-2xl border border-zinc-900">
                             <span class="text-[9px] text-zinc-300 px-3 font-bold uppercase">strokes per tap</span>
                             <div class="flex gap-1">
-                                ${[1, 2, 3].map(n => `<button onclick="setMult(${n})" ${a.recording?'disabled':''} class="w-12 h-12 rounded-xl text-sm font-bold transition-colors ${a.multiplier===n?'bg-yellow-300 text-black':'bg-zinc-900 text-zinc-300'}">${n}</button>`).join('')}
+                                ${[1, 2, 3].map(n => `<button onclick="setMult(${n})" class="w-12 h-12 rounded-xl text-sm font-bold transition-colors ${a.multiplier===n?'bg-yellow-300 text-black':'bg-zinc-900 text-zinc-300'}">${n}</button>`).join('')}
                             </div>
                         </div>
                         <div class="grid grid-cols-2 gap-3">
@@ -374,7 +375,7 @@
 
         // --- global ---
         window.setView = (v) => { appState.view = v; render(); };
-        window.setMult = (n) => { appState.active.multiplier = n; render(); };
+        window.setMult = (n) => { appState.active.multiplier = n; appState.lastTap = null; render(); };
         window.detail = (id) => { appState.selected = appState.sessions.find(s => s.id === id); appState.view = 'detail'; render(); };
         window.del = (id) => { if(confirm("delete record?")) deleteFromDB(id); };
         window.start = start; window.stop = stop; window.split = split;
