@@ -112,7 +112,8 @@
             },
             selected: null,
             interval: null,
-            lastTap: null
+            lastTap: null,
+            detailFilter: 'all'
         };
 
         // --- db ---
@@ -315,10 +316,25 @@
                         </div>
                         <canvas id="chart" class="w-full h-44 bg-black rounded-2xl border border-zinc-900"></canvas>
                         <div>
-                            <span class="text-[10px] text-zinc-400 font-bold uppercase block mb-3 tracking-widest">split markers</span>
+                            <div class="flex justify-between items-center bg-zinc-950 p-2 rounded-2xl border border-zinc-900 mb-3">
+                                <span class="text-[9px] text-zinc-300 px-3 font-bold uppercase">log</span>
+                                <div class="flex gap-1">
+                                    ${['all','splits','rates'].map(f => `<button onclick="setFilter('${f}')" class="px-3 h-10 rounded-xl text-xs font-bold transition-colors lowercase ${appState.detailFilter===f?'bg-yellow-300 text-black':'bg-zinc-900 text-zinc-300'}">${f}</button>`).join('')}
+                                </div>
+                            </div>
                             <div class="space-y-1">
-                                ${s.splits.map((t, i) => `<div class="flex justify-between text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-zinc-400 lowercase">marker ${i+1}</span><span class="text-white">${format(t)}</span></div>`).join('')}
-                                ${s.splits.length === 0 ? '<span class="text-zinc-300 italic text-[10px] lowercase">no splits marked</span>' : ''}
+                                ${(() => {
+                                    const f = appState.detailFilter;
+                                    const items = [];
+                                    if (f !== 'rates') (s.splits || []).forEach((t, i) => items.push({ type: 'split', time: t, idx: i }));
+                                    if (f !== 'splits') (s.logs || []).forEach(l => items.push({ type: 'rate', time: l.time, rate: l.rate }));
+                                    items.sort((a, b) => a.time - b.time);
+                                    if (items.length === 0) return '<span class="text-zinc-300 italic text-[10px] lowercase">no entries</span>';
+                                    return items.map(it => it.type === 'split'
+                                        ? `<div class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-yellow-300 lowercase font-bold">▸ split ${it.idx+1}</span><span class="text-white">${format(it.time)}</span></div>`
+                                        : `<div class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-zinc-300 lowercase">${it.rate.toFixed(1)} <span class="text-zinc-500">spm</span></span><span class="text-white">${format(it.time)}</span></div>`
+                                    ).join('');
+                                })()}
                             </div>
                         </div>
                     </div>
@@ -376,6 +392,7 @@
         // --- global ---
         window.setView = (v) => { appState.view = v; render(); };
         window.setMult = (n) => { appState.active.multiplier = n; appState.lastTap = null; render(); };
+        window.setFilter = (f) => { appState.detailFilter = f; render(); };
         window.detail = (id) => { appState.selected = appState.sessions.find(s => s.id === id); appState.view = 'detail'; render(); };
         window.del = (id) => { if(confirm("delete record?")) deleteFromDB(id); };
         window.start = start; window.stop = stop; window.split = split;
