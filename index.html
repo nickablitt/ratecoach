@@ -108,8 +108,13 @@
                 lapStart: 0,
                 multiplier: 1,
                 rate: 0,
-                logs: [], 
-                splits: []
+                logs: [],
+                splits: [],
+                gps: [],
+                distance: 0,
+                pace: 0,
+                gpsAccuracy: null,
+                gpsStatus: 'inactive' // inactive | requesting | active | denied | unavailable
             },
             selected: null,
             interval: null,
@@ -147,7 +152,9 @@
                 total: appState.active.total,
                 avgRate: appState.active.logs.reduce((a, b) => a + b.rate, 0) / appState.active.logs.length,
                 logs: appState.active.logs,
-                splits: appState.active.splits
+                splits: appState.active.splits,
+                gps: appState.active.gps,
+                distance: appState.active.distance
             };
             const tx = db.transaction("sessions", "readwrite");
             const req = tx.objectStore("sessions").add(session);
@@ -180,6 +187,134 @@
             };
         };
 
+        // --- gps + wake lock ---
+        let gpsWatchId = null;
+        let wakeLock = null;
+        let lastGoodFix = null;
+        const GPS_GOOD_ACCURACY = 30; // m — discard worse fixes for distance
+        const GPS_MAX_JUMP = 100; // m — discard implausible jumps between fixes
+        const PACE_SMOOTHING = 0.3; // EMA factor for displayed pace
+
+        const haversine = (a, b) => {
+            const R = 6371000;
+            const toRad = d => d * Math.PI / 180;
+            const dLat = toRad(b.lat - a.lat);
+            const dLng = toRad(b.lng - a.lng);
+            const la1 = toRad(a.lat), la2 = toRad(b.lat);
+            const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLng/2)**2;
+            return 2 * R * Math.asin(Math.sqrt(h));
+        };
+
+        const acquireWakeLock = async () => {
+            if (!('wakeLock' in navigator)) return;
+            try { wakeLock = await navigator.wakeLock.request('screen'); }
+            catch (e) { console.warn('wake lock failed', e); }
+        };
+        const releaseWakeLock = () => {
+            if (wakeLock) { try { wakeLock.release(); } catch {} wakeLock = null; }
+        };
+        document.addEventListener('visibilitychange', async () => {
+            if (document.visibilityState === 'visible' && appState.active.recording && !wakeLock) {
+                await acquireWakeLock();
+            }
+        });
+
+        const startGPS = () => {
+            if (gpsWatchId != null) {
+                navigator.geolocation.clearWatch(gpsWatchId);
+                gpsWatchId = null;
+            }
+            if (!('geolocation' in navigator)) {
+                appState.active.gpsStatus = 'unavailable';
+                return;
+            }
+            appState.active.gpsStatus = 'requesting';
+            lastGoodFix = null;
+            gpsWatchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    const a = appState.active;
+                    const c = pos.coords;
+                    const fix = {
+                        time: a.total,
+                        lat: c.latitude,
+                        lng: c.longitude,
+                        accuracy: c.accuracy,
+                        speed: c.speed == null ? null : c.speed,
+                        heading: c.heading == null ? null : c.heading
+                    };
+                    a.gps.push(fix);
+                    a.gpsAccuracy = c.accuracy;
+                    a.gpsStatus = 'active';
+
+                    // distance & pace — only count fixes with decent accuracy
+                    if (c.accuracy <= GPS_GOOD_ACCURACY) {
+                        if (lastGoodFix) {
+                            const d = haversine(lastGoodFix, fix);
+                            // reject teleports (likely from a bad prior fix)
+                            if (d < GPS_MAX_JUMP) {
+                                a.distance += d;
+                            }
+                        }
+                        lastGoodFix = fix;
+                    }
+                    // pace from speed (smoothed)
+                    if (c.speed != null && c.speed > 0.3) {
+                        const instPace = 500 / c.speed; // s per 500m
+                        a.pace = a.pace > 0 ? a.pace * (1 - PACE_SMOOTHING) + instPace * PACE_SMOOTHING : instPace;
+                    } else if (c.speed != null && c.speed <= 0.3) {
+                        a.pace = 0;
+                    }
+                },
+                (err) => {
+                    if (err.code === err.PERMISSION_DENIED) appState.active.gpsStatus = 'denied';
+                    else appState.active.gpsStatus = 'unavailable';
+                    console.warn('gps error', err);
+                },
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 }
+            );
+        };
+
+        const stopGPS = () => {
+            if (gpsWatchId != null) {
+                navigator.geolocation.clearWatch(gpsWatchId);
+                gpsWatchId = null;
+            }
+            appState.active.gpsStatus = 'inactive';
+            appState.active.gpsAccuracy = null;
+            lastGoodFix = null;
+        };
+
+        const formatPace = (s) => {
+            if (!s || !isFinite(s) || s <= 0) return '--:--';
+            if (s > 99 * 60) return '99:59';
+            const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+            return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+        };
+
+        const formatDistance = (m) => {
+            if (m < 1000) return `${Math.round(m)} m`;
+            return `${(m / 1000).toFixed(2)} km`;
+        };
+
+        // --- leaflet lazy loader ---
+        let leafletLoading = null;
+        const loadLeaflet = () => {
+            if (window.L) return Promise.resolve();
+            if (leafletLoading) return leafletLoading;
+            leafletLoading = new Promise((resolve, reject) => {
+                const css = document.createElement('link');
+                css.rel = 'stylesheet';
+                css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+                document.head.appendChild(css);
+                const script = document.createElement('script');
+                script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+                script.onload = () => resolve();
+                script.onerror = reject;
+                document.head.appendChild(script);
+            });
+            return leafletLoading;
+        };
+
         // --- csv export ---
         const csvEscape = (v) => {
             if (v == null) return '';
@@ -193,15 +328,18 @@
                 `# date,${s.date}`,
                 `# total_ms,${s.total}`,
                 `# avg_rate,${s.avgRate}`,
-                'type,time_ms,rate_spm,split_index'
+                `# distance_m,${s.distance || 0}`,
+                'type,time_ms,rate_spm,split_index,lat,lng,accuracy_m,speed_mps'
             ];
             const items = [];
             (s.logs || []).forEach(l => items.push({ type: 'rate', time: l.time, rate: l.rate }));
             (s.splits || []).forEach((t, i) => items.push({ type: 'split', time: t, idx: i + 1 }));
+            (s.gps || []).forEach(g => items.push({ type: 'gps', time: g.time, lat: g.lat, lng: g.lng, accuracy: g.accuracy, speed: g.speed }));
             items.sort((a, b) => a.time - b.time);
             items.forEach(it => {
-                if (it.type === 'rate') lines.push(`rate,${it.time},${it.rate},`);
-                else lines.push(`split,${it.time},,${it.idx}`);
+                if (it.type === 'rate') lines.push(`rate,${it.time},${it.rate},,,,,`);
+                else if (it.type === 'split') lines.push(`split,${it.time},,${it.idx},,,,`);
+                else lines.push(`gps,${it.time},,,${it.lat},${it.lng},${it.accuracy},${it.speed == null ? '' : it.speed}`);
             });
             return lines.join('\n');
         };
@@ -359,20 +497,28 @@
                     if (m) meta[m[1].trim()] = m[2];
                 } else if (lines[i].startsWith('type,')) { dataStart = i + 1; break; }
             }
-            const logs = [], splits = [];
+            const logs = [], splits = [], gps = [];
             for (let i = dataStart; i < lines.length; i++) {
                 const line = lines[i].trim();
                 if (!line) continue;
                 const cols = line.split(',');
                 if (cols[0] === 'rate') logs.push({ rate: parseFloat(cols[2]), time: parseInt(cols[1]) });
                 else if (cols[0] === 'split') splits.push(parseInt(cols[1]));
+                else if (cols[0] === 'gps') gps.push({
+                    time: parseInt(cols[1]),
+                    lat: parseFloat(cols[4]),
+                    lng: parseFloat(cols[5]),
+                    accuracy: parseFloat(cols[6]),
+                    speed: cols[7] === '' ? null : parseFloat(cols[7])
+                });
             }
             return {
                 name: meta.name || 'imported',
                 date: meta.date || new Date().toISOString(),
                 total: parseInt(meta.total_ms) || 0,
                 avgRate: parseFloat(meta.avg_rate) || 0,
-                logs, splits
+                distance: parseFloat(meta.distance_m) || 0,
+                logs, splits, gps
             };
         };
 
@@ -426,7 +572,7 @@
 
         const resetSession = () => {
             clearInterval(appState.interval);
-            appState.active = { ...appState.active, recording: false, total: 0, lapStart: 0, rate: 0, logs: [], splits: [] };
+            appState.active = { ...appState.active, recording: false, total: 0, lapStart: 0, rate: 0, logs: [], splits: [], gps: [], distance: 0, pace: 0, gpsAccuracy: null, gpsStatus: 'inactive' };
             appState.lastTap = null;
         };
 
@@ -435,22 +581,42 @@
             appState.active.recording = true;
             const now = Date.now();
             appState.active.start = now;
-            render(); 
+            acquireWakeLock();
+            startGPS();
+            render();
 
             appState.interval = setInterval(() => {
                 appState.active.total = Date.now() - now;
                 const totalDisplay = document.getElementById('total-timer-display');
                 const lapDisplay = document.getElementById('lap-timer-display');
+                const distDisplay = document.getElementById('dist-display');
+                const paceDisplay = document.getElementById('pace-display');
+                const gpsDisplay = document.getElementById('gps-display');
                 if (totalDisplay) totalDisplay.textContent = format(appState.active.total);
                 if (lapDisplay) lapDisplay.textContent = format(appState.active.total - appState.active.lapStart);
-            }, 50);
+                if (distDisplay) distDisplay.textContent = formatDistance(appState.active.distance);
+                if (paceDisplay) paceDisplay.textContent = formatPace(appState.active.pace);
+                if (gpsDisplay) gpsDisplay.textContent = gpsLabel(appState.active);
+            }, 100);
         };
 
         const stop = () => {
             clearInterval(appState.interval);
+            stopGPS();
+            releaseWakeLock();
             appState.active.recording = false;
             appState.view = appState.active.logs.length > 0 ? 'save' : 'main';
             render();
+        };
+
+        const gpsLabel = (a) => {
+            if (a.gpsStatus === 'denied') return 'gps off';
+            if (a.gpsStatus === 'unavailable') return 'gps n/a';
+            if (a.gpsStatus === 'requesting') return 'gps...';
+            if (a.gpsAccuracy == null) return 'gps --';
+            if (a.gpsAccuracy < 10) return `gps ${Math.round(a.gpsAccuracy)}m ●●●`;
+            if (a.gpsAccuracy < 30) return `gps ${Math.round(a.gpsAccuracy)}m ●●○`;
+            return `gps ${Math.round(a.gpsAccuracy)}m ●○○`;
         };
 
         const tap = () => {
@@ -507,7 +673,17 @@
                     <div id="tap-target" class="main-tap-zone ${a.recording ? 'recording' : ''}">
                         <span class="text-[10px] text-zinc-400 font-bold uppercase tracking-widest mb-4">total session time</span>
                         <div id="total-timer-display" class="text-6xl font-bold text-white font-mono tracking-tighter">${format(a.total)}</div>
-                        <p class="text-[10px] text-zinc-300 mt-8 lowercase">${a.recording ? `sample: every ${a.multiplier} strokes` : 'press start to begin'}</p>
+                        <div class="flex gap-6 mt-6 font-mono text-center">
+                            <div>
+                                <div class="text-[9px] text-zinc-400 font-bold uppercase tracking-widest mb-1">dist</div>
+                                <div id="dist-display" class="text-base font-bold text-white">${formatDistance(a.distance)}</div>
+                            </div>
+                            <div>
+                                <div class="text-[9px] text-zinc-400 font-bold uppercase tracking-widest mb-1">pace /500m</div>
+                                <div id="pace-display" class="text-base font-bold text-yellow-300">${formatPace(a.pace)}</div>
+                            </div>
+                        </div>
+                        <p id="gps-display" class="text-[10px] text-zinc-300 mt-6 lowercase font-mono">${a.recording ? gpsLabel(a) : 'press start to begin'}</p>
                     </div>
 
                     <div class="flex flex-col gap-4 mt-4">
@@ -540,7 +716,7 @@
                         ${appState.sessions.map(s => `<div onclick="detail(${s.id})" class="p-4 bg-zinc-950 border border-zinc-900 rounded-2xl flex justify-between items-center active:bg-zinc-900">
                             <div>
                                 <div class="text-sm font-bold text-zinc-200">${s.name}</div>
-                                <div class="text-[9px] text-zinc-400 font-bold uppercase mt-1">${new Date(s.date).toLocaleDateString()}</div>
+                                <div class="text-[9px] text-zinc-400 font-bold uppercase mt-1">${new Date(s.date).toLocaleDateString()}${s.distance ? ` · ${formatDistance(s.distance)}` : ''}</div>
                             </div>
                             <div class="text-right">
                                 <div class="text-xl font-bold text-yellow-300 font-mono">${s.avgRate.toFixed(1)}</div>
@@ -566,7 +742,16 @@
                                 <span class="text-[9px] text-zinc-400 font-bold uppercase block mb-1">avg rate</span>
                                 <span class="text-xl font-bold text-yellow-300 font-mono">${s.avgRate.toFixed(1)}</span>
                             </div>
+                            ${s.distance ? `<div class="bg-zinc-950 p-4 rounded-2xl border border-zinc-900">
+                                <span class="text-[9px] text-zinc-400 font-bold uppercase block mb-1">distance</span>
+                                <span class="text-xl font-bold text-white font-mono">${formatDistance(s.distance)}</span>
+                            </div>
+                            <div class="bg-zinc-950 p-4 rounded-2xl border border-zinc-900">
+                                <span class="text-[9px] text-zinc-400 font-bold uppercase block mb-1">avg pace</span>
+                                <span class="text-xl font-bold text-yellow-300 font-mono">${formatPace(s.total > 0 ? (s.total / 1000) / (s.distance / 500) : 0)}</span>
+                            </div>` : ''}
                         </div>
+                        ${(s.gps && s.gps.length > 1) ? `<div id="map" class="w-full h-56 rounded-2xl border border-zinc-900 overflow-hidden bg-zinc-950"></div>` : ''}
                         <canvas id="chart" class="w-full h-44 bg-black rounded-2xl border border-zinc-900"></canvas>
                         <div>
                             <div class="flex justify-between items-center bg-zinc-950 p-2 rounded-2xl border border-zinc-900 mb-3">
@@ -587,10 +772,11 @@
                                     return items.map(it => {
                                         const isSel = sel && sel.type === it.type && sel.time === it.time;
                                         const selBg = isSel ? 'bg-zinc-800' : 'active:bg-zinc-900';
+                                        const dataAttrs = `data-log-row data-log-type="${it.type}" data-log-time="${it.time}"`;
                                         if (it.type === 'split') {
-                                            return `<div onclick="selectLog('split', ${it.time})" class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2 px-2 rounded-md cursor-pointer ${selBg}"><span class="text-white lowercase font-bold">▸ split ${it.idx+1}</span><span class="text-white">${format(it.time)}</span></div>`;
+                                            return `<div ${dataAttrs} onclick="selectLog('split', ${it.time})" class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2 px-2 rounded-md cursor-pointer ${selBg}"><span class="text-white lowercase font-bold">▸ split ${it.idx+1}</span><span class="text-white">${format(it.time)}</span></div>`;
                                         }
-                                        return `<div onclick="selectLog('rate', ${it.time})" class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2 px-2 rounded-md cursor-pointer ${selBg}"><span class="text-yellow-300 lowercase">${it.rate.toFixed(1)} <span class="text-yellow-300/60">spm</span></span><span class="text-white">${format(it.time)}</span></div>`;
+                                        return `<div ${dataAttrs} onclick="selectLog('rate', ${it.time})" class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2 px-2 rounded-md cursor-pointer ${selBg}"><span class="text-yellow-300 lowercase">${it.rate.toFixed(1)} <span class="text-yellow-300/60">spm</span></span><span class="text-white">${format(it.time)}</span></div>`;
                                     }).join('');
                                 })()}
                             </div>
@@ -603,6 +789,9 @@
                     </div>
                 </div>`;
                 setTimeout(() => draw(s), 10);
+                if (s.gps && s.gps.length > 1) {
+                    loadLeaflet().then(() => drawMap(s)).catch(e => console.error('map load failed', e));
+                }
             }
 
             if (appState.view === 'save') {
@@ -732,8 +921,81 @@
             ctx.stroke();
         };
 
+        // --- map (recall detail view) ---
+        let currentMap = null;
+        let currentMapHighlight = null;
+
+        const updateMapHighlight = (s) => {
+            if (!currentMap || !window.L || !s || !s.gps || s.gps.length < 1) return;
+            if (currentMapHighlight) {
+                try { currentMap.removeLayer(currentMapHighlight); } catch {}
+                currentMapHighlight = null;
+            }
+            const sel = appState.selectedLog;
+            if (!sel) return;
+            // find nearest GPS fix to the selected time
+            let nearest = null, bestDiff = Infinity;
+            for (const g of s.gps) {
+                if (!isFinite(g.lat) || !isFinite(g.lng)) continue;
+                const d = Math.abs(g.time - sel.time);
+                if (d < bestDiff) { bestDiff = d; nearest = g; }
+            }
+            if (!nearest) return;
+            const fillColor = sel.type === 'split' ? '#ffffff' : '#fde047';
+            currentMapHighlight = L.circleMarker([nearest.lat, nearest.lng], {
+                color: '#000',
+                fillColor,
+                fillOpacity: 1,
+                weight: 3,
+                radius: 10
+            }).addTo(currentMap);
+            // pan into view if needed
+            if (!currentMap.getBounds().pad(-0.1).contains([nearest.lat, nearest.lng])) {
+                currentMap.panTo([nearest.lat, nearest.lng]);
+            }
+        };
+
+        const drawMap = (s) => {
+            if (currentMap) { try { currentMap.remove(); } catch {} currentMap = null; }
+            const el = document.getElementById('map');
+            if (!el || !window.L || !s.gps || s.gps.length < 2) return;
+            // prefer good-accuracy fixes; fall back to all valid lat/lng
+            const valid = s.gps.filter(g => isFinite(g.lat) && isFinite(g.lng));
+            const good = valid.filter(g => g.accuracy <= GPS_GOOD_ACCURACY);
+            const fixes = good.length > 1 ? good : valid;
+            if (fixes.length < 2) return;
+            const latlngs = fixes.map(g => [g.lat, g.lng]);
+            currentMap = L.map(el, { zoomControl: true }).setView(latlngs[0], 15);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            }).addTo(currentMap);
+            L.polyline(latlngs, { color: '#fde047', weight: 4, opacity: 0.9 }).addTo(currentMap);
+            L.circleMarker(latlngs[0], { color: '#000', fillColor: '#fde047', fillOpacity: 1, weight: 2, radius: 6 }).addTo(currentMap).bindTooltip('start');
+            L.circleMarker(latlngs[latlngs.length - 1], { color: '#000', fillColor: '#ffffff', fillOpacity: 1, weight: 2, radius: 6 }).addTo(currentMap).bindTooltip('end');
+            // mark splits
+            (s.splits || []).forEach((splitTime, i) => {
+                // find nearest gps fix to splitTime
+                let nearest = null, bestDiff = Infinity;
+                for (const g of fixes) {
+                    const d = Math.abs(g.time - splitTime);
+                    if (d < bestDiff) { bestDiff = d; nearest = g; }
+                }
+                if (nearest) {
+                    L.circleMarker([nearest.lat, nearest.lng], { color: '#000', fillColor: '#ffffff', fillOpacity: 0.95, weight: 2, radius: 4 }).addTo(currentMap).bindTooltip(`split ${i+1}`);
+                }
+            });
+            currentMap.fitBounds(L.latLngBounds(latlngs), { padding: [20, 20] });
+            currentMapHighlight = null;
+            if (appState.selectedLog) updateMapHighlight(s);
+        };
+
         // --- global ---
-        window.setView = (v) => { appState.view = v; render(); };
+        window.setView = (v) => {
+            if (v !== 'detail' && currentMap) { try { currentMap.remove(); } catch {} currentMap = null; }
+            appState.view = v;
+            render();
+        };
         window.setMult = (n) => { appState.active.multiplier = n; appState.lastTap = null; render(); };
         window.setFilter = (f) => { appState.detailFilter = f; render(); };
         window.exportCSV = () => { if (appState.selected) downloadSessionCSV(appState.selected); };
@@ -743,7 +1005,21 @@
         window.selectLog = (type, time) => {
             const c = appState.selectedLog;
             appState.selectedLog = (c && c.type === type && c.time === time) ? null : { type, time };
-            render();
+            // partial update so the map keeps its pan/zoom
+            if (appState.view === 'detail' && appState.selected) {
+                const sel = appState.selectedLog;
+                document.querySelectorAll('[data-log-row]').forEach(el => {
+                    const t = el.getAttribute('data-log-type');
+                    const tm = parseInt(el.getAttribute('data-log-time'), 10);
+                    const isSel = sel && sel.type === t && sel.time === tm;
+                    el.classList.toggle('bg-zinc-800', isSel);
+                    el.classList.toggle('active:bg-zinc-900', !isSel);
+                });
+                draw(appState.selected);
+                updateMapHighlight(appState.selected);
+            } else {
+                render();
+            }
         };
         window.detail = (id) => { appState.selected = appState.sessions.find(s => s.id === id); appState.selectedLog = null; appState.view = 'detail'; render(); };
         window.del = (id) => { if(confirm("delete record?")) deleteFromDB(id); };
