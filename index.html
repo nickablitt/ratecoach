@@ -113,7 +113,8 @@
             selected: null,
             interval: null,
             lastTap: null,
-            detailFilter: 'all'
+            detailFilter: 'all',
+            selectedLog: null
         };
 
         // --- db ---
@@ -325,15 +326,20 @@
                             <div class="space-y-1">
                                 ${(() => {
                                     const f = appState.detailFilter;
+                                    const sel = appState.selectedLog;
                                     const items = [];
                                     if (f !== 'rates') (s.splits || []).forEach((t, i) => items.push({ type: 'split', time: t, idx: i }));
                                     if (f !== 'splits') (s.logs || []).forEach(l => items.push({ type: 'rate', time: l.time, rate: l.rate }));
                                     items.sort((a, b) => a.time - b.time);
                                     if (items.length === 0) return '<span class="text-zinc-300 italic text-[10px] lowercase">no entries</span>';
-                                    return items.map(it => it.type === 'split'
-                                        ? `<div class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-yellow-300 lowercase font-bold">▸ split ${it.idx+1}</span><span class="text-white">${format(it.time)}</span></div>`
-                                        : `<div class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-zinc-300 lowercase">${it.rate.toFixed(1)} <span class="text-zinc-500">spm</span></span><span class="text-white">${format(it.time)}</span></div>`
-                                    ).join('');
+                                    return items.map(it => {
+                                        const isSel = sel && sel.type === it.type && sel.time === it.time;
+                                        const selBg = isSel ? 'bg-zinc-800' : 'active:bg-zinc-900';
+                                        if (it.type === 'split') {
+                                            return `<div onclick="selectLog('split', ${it.time})" class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2 px-2 rounded-md cursor-pointer ${selBg}"><span class="text-white lowercase font-bold">▸ split ${it.idx+1}</span><span class="text-white">${format(it.time)}</span></div>`;
+                                        }
+                                        return `<div onclick="selectLog('rate', ${it.time})" class="flex justify-between items-center text-[11px] font-mono border-b border-zinc-900 py-2 px-2 rounded-md cursor-pointer ${selBg}"><span class="text-yellow-300 lowercase">${it.rate.toFixed(1)} <span class="text-yellow-300/60">spm</span></span><span class="text-white">${format(it.time)}</span></div>`;
+                                    }).join('');
                                 })()}
                             </div>
                         </div>
@@ -379,13 +385,97 @@
             const getX = (t) => p + (t / tRange) * (w - p * 2);
             const getY = (r) => h - p - ((r - min) / (range || 1)) * (h - p * 2);
 
-            ctx.strokeStyle = 'rgba(255, 255, 0, 0.15)';
-            s.splits.forEach(t => { ctx.beginPath(); ctx.moveTo(getX(t), p); ctx.lineTo(getX(t), h - p); ctx.stroke(); });
-            ctx.strokeStyle = '#111';
+            const f = appState.detailFilter;
+
+            // horizontal gridlines
+            ctx.strokeStyle = '#111'; ctx.lineWidth = 1;
             [0, 0.5, 1].forEach(v => { const y = p + v*(h-p*2); ctx.beginPath(); ctx.moveTo(p, y); ctx.lineTo(w-p, y); ctx.stroke(); });
+
+            // session boundary markers (start + end)
+            const drawBoundary = (x, label, time) => {
+                ctx.strokeStyle = 'rgba(253, 224, 71, 0.9)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x, p - 8);
+                ctx.lineTo(x, h - p + 8);
+                ctx.stroke();
+                // top cap
+                ctx.beginPath();
+                ctx.moveTo(x - 5, p - 8);
+                ctx.lineTo(x + 5, p - 8);
+                ctx.stroke();
+                // bottom cap
+                ctx.beginPath();
+                ctx.moveTo(x - 5, h - p + 8);
+                ctx.lineTo(x + 5, h - p + 8);
+                ctx.stroke();
+                // labels
+                ctx.fillStyle = '#fde047';
+                ctx.font = 'bold 8px "Roboto Mono", monospace';
+                ctx.textAlign = x < w/2 ? 'left' : 'right';
+                ctx.fillText(label, x < w/2 ? x : x, p - 14);
+                ctx.fillStyle = '#a1a1aa';
+                ctx.font = '8px "Roboto Mono", monospace';
+                ctx.fillText(time, x < w/2 ? x : x, h - p + 20);
+            };
+            drawBoundary(p, 'START', '00:00.00');
+            drawBoundary(w - p, 'END', format(s.total));
+
+            // rate sample verticals (yellow)
+            if (f !== 'splits') {
+                ctx.strokeStyle = 'rgba(253, 224, 71, 0.35)';
+                ctx.lineWidth = 1;
+                (s.logs || []).forEach(l => { ctx.beginPath(); ctx.moveTo(getX(l.time), p); ctx.lineTo(getX(l.time), h - p); ctx.stroke(); });
+            }
+
+            // split verticals (white)
+            if (f !== 'rates') {
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                ctx.lineWidth = 1.5;
+                (s.splits || []).forEach(t => { ctx.beginPath(); ctx.moveTo(getX(t), p); ctx.lineTo(getX(t), h - p); ctx.stroke(); });
+            }
+
+            // selected entry highlight (drawn under the rate line so it doesn't cover it)
+            const sel = appState.selectedLog;
+            if (sel) {
+                const x = getX(sel.time);
+                ctx.strokeStyle = sel.type === 'split' ? '#ffffff' : '#fde047';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(x, p - 6);
+                ctx.lineTo(x, h - p + 6);
+                ctx.stroke();
+                // matching dot at the rate value if it's a rate entry
+                if (sel.type === 'rate') {
+                    const match = (s.logs || []).find(l => l.time === sel.time);
+                    if (match) {
+                        ctx.fillStyle = '#fde047';
+                        ctx.beginPath();
+                        ctx.arc(x, getY(match.rate), 4, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            }
+
+            // rate line (smooth catmull-rom through every sample)
             ctx.strokeStyle = '#fde047'; ctx.lineWidth = 2;
+            ctx.lineJoin = 'round'; ctx.lineCap = 'round';
             ctx.beginPath();
-            s.logs.forEach((l, i) => { if(i===0) ctx.moveTo(getX(l.time), getY(l.rate)); else ctx.lineTo(getX(l.time), getY(l.rate)); });
+            const pts = s.logs.map(l => ({ x: getX(l.time), y: getY(l.rate) }));
+            if (pts.length > 0) {
+                ctx.moveTo(pts[0].x, pts[0].y);
+                for (let i = 0; i < pts.length - 1; i++) {
+                    const p0 = pts[i - 1] || pts[i];
+                    const p1 = pts[i];
+                    const p2 = pts[i + 1];
+                    const p3 = pts[i + 2] || pts[i + 1];
+                    const cp1x = p1.x + (p2.x - p0.x) / 6;
+                    const cp1y = p1.y + (p2.y - p0.y) / 6;
+                    const cp2x = p2.x - (p3.x - p1.x) / 6;
+                    const cp2y = p2.y - (p3.y - p1.y) / 6;
+                    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+                }
+            }
             ctx.stroke();
         };
 
@@ -393,7 +483,12 @@
         window.setView = (v) => { appState.view = v; render(); };
         window.setMult = (n) => { appState.active.multiplier = n; appState.lastTap = null; render(); };
         window.setFilter = (f) => { appState.detailFilter = f; render(); };
-        window.detail = (id) => { appState.selected = appState.sessions.find(s => s.id === id); appState.view = 'detail'; render(); };
+        window.selectLog = (type, time) => {
+            const c = appState.selectedLog;
+            appState.selectedLog = (c && c.type === type && c.time === time) ? null : { type, time };
+            render();
+        };
+        window.detail = (id) => { appState.selected = appState.sessions.find(s => s.id === id); appState.selectedLog = null; appState.view = 'detail'; render(); };
         window.del = (id) => { if(confirm("delete record?")) deleteFromDB(id); };
         window.start = start; window.stop = stop; window.split = split;
 
