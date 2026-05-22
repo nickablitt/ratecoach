@@ -62,25 +62,46 @@
             border: 2px solid #18181b;
             border-radius: 3rem;
             margin: 1rem 0;
-            transition: background-color 0.05s, transform 0.05s;
+            transition: transform 0.1s ease-out, background-color 0.15s, box-shadow 0.2s ease-out;
         }
         .main-tap-zone:active {
-            background-color: #1a1505;
-            transform: scale(0.99);
+            background-color: rgba(253, 224, 71, 0.06);
+            transform: scale(0.985);
         }
         .main-tap-zone.recording { border-color: #713f12; }
+        .main-tap-zone.tap-pulse {
+            animation: tap-pulse 0.35s ease-out;
+        }
+        @keyframes tap-pulse {
+            0%   { box-shadow: 0 0 0 0 rgba(253, 224, 71, 0.7), inset 0 0 0 0 rgba(253, 224, 71, 0); }
+            40%  { box-shadow: 0 0 32px 8px rgba(253, 224, 71, 0.45), inset 0 0 30px 4px rgba(253, 224, 71, 0.15); }
+            100% { box-shadow: 0 0 0 0 rgba(253, 224, 71, 0), inset 0 0 0 0 rgba(253, 224, 71, 0); }
+        }
+
+        button { -webkit-tap-highlight-color: transparent; }
+        button:not(.btn) { transition: transform 0.08s ease-out, box-shadow 0.1s ease-out, background-color 0.15s, color 0.15s; }
+        button:not(.btn):active { transform: scale(0.93); }
 
         .btn {
             padding: 1.25rem;
             border-radius: 1.25rem;
             font-weight: 700;
             text-align: center;
-            transition: opacity 0.1s;
+            transition: transform 0.08s ease-out, box-shadow 0.15s ease-out, opacity 0.08s;
         }
-        .btn:active { opacity: 0.7; }
+        .btn:active { opacity: 0.9; transform: scale(0.96); }
+        .btn.btn-pulse { animation: btn-pulse 0.4s ease-out; }
+        @keyframes btn-pulse {
+            0%   { box-shadow: 0 0 0 0 rgba(253, 224, 71, 0.7); }
+            40%  { box-shadow: 0 0 18px 6px rgba(253, 224, 71, 0.5), 0 0 0 3px rgba(253, 224, 71, 0.7); }
+            100% { box-shadow: 0 0 0 0 rgba(253, 224, 71, 0); }
+        }
         .btn-primary { background: var(--accent); color: #000; }
+        .btn-primary:active { box-shadow: 0 0 0 3px rgba(253, 224, 71, 0.55), 0 0 24px rgba(253, 224, 71, 0.45); }
         .btn-dark { background: #18181b; color: #fff; }
+        .btn-dark:active { box-shadow: 0 0 0 2px rgba(253, 224, 71, 0.6); }
         .btn-danger { background: #450a0a; color: #f87171; }
+        .btn-danger:active { box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.6); }
 
         .custom-scroll::-webkit-scrollbar { display: none; }
     </style>
@@ -185,6 +206,13 @@
                     cloudDeleteSession(driveFileId).catch(err => console.error('cloud delete failed', err));
                 }
             };
+        };
+
+        // --- haptics (android only — ios safari ignores) ---
+        const haptic = (pattern) => {
+            if ('vibrate' in navigator) {
+                try { navigator.vibrate(pattern); } catch {}
+            }
         };
 
         // --- gps + wake lock ---
@@ -640,6 +668,15 @@
         };
 
         const tap = () => {
+            // short crisp blip for every stroke tap
+            haptic(12);
+            // trigger pulse animation on the tap zone
+            const target = document.getElementById('tap-target');
+            if (target) {
+                target.classList.remove('tap-pulse');
+                void target.offsetWidth; // force reflow so animation restarts
+                target.classList.add('tap-pulse');
+            }
             const now = Date.now();
             if (appState.lastTap) {
                 const delta = now - appState.lastTap;
@@ -650,14 +687,27 @@
                 }
             }
             appState.lastTap = now;
-            render();
+            // partial update — don't blow away the running pulse animation
+            const spmEl = document.getElementById('spm-display');
+            if (spmEl) spmEl.textContent = appState.active.rate > 0 ? appState.active.rate.toFixed(1) : '0.0';
         };
 
         const split = () => {
             if (!appState.active.recording) return;
+            // distinctive double-buzz for splits so it feels different from a rate tap
+            haptic([20, 40, 20]);
             appState.active.splits.push(appState.active.total);
             appState.active.lapStart = appState.active.total;
-            render();
+            // pulse the split button
+            const btn = document.getElementById('split-btn');
+            if (btn) {
+                btn.classList.remove('btn-pulse');
+                void btn.offsetWidth; // force reflow so animation restarts on rapid splits
+                btn.classList.add('btn-pulse');
+            }
+            // reset the lap display immediately; the interval will keep ticking from 0
+            const lapDisplay = document.getElementById('lap-timer-display');
+            if (lapDisplay) lapDisplay.textContent = format(0);
         };
 
         // --- render ---
@@ -691,7 +741,7 @@
 
                     <div id="tap-target" class="main-tap-zone ${a.recording ? 'recording' : ''}">
                         <span class="text-[10px] text-zinc-400 font-bold uppercase tracking-widest mb-4">spm</span>
-                        <div class="text-8xl font-bold text-yellow-300 font-mono tracking-tighter">${a.rate > 0 ? a.rate.toFixed(1) : "0.0"}</div>
+                        <div id="spm-display" class="text-8xl font-bold text-yellow-300 font-mono tracking-tighter">${a.rate > 0 ? a.rate.toFixed(1) : "0.0"}</div>
                         <div class="flex gap-6 mt-6 font-mono text-center">
                             <div>
                                 <div class="text-[9px] text-zinc-400 font-bold uppercase tracking-widest mb-1">dist</div>
@@ -714,7 +764,7 @@
                         </div>
                         <div class="grid grid-cols-2 gap-3">
                             ${a.recording ? 
-                                `<button onclick="split()" class="btn btn-dark lowercase">split</button><button onclick="stop()" class="btn btn-danger lowercase">stop</button>` :
+                                `<button id="split-btn" onclick="split()" class="btn btn-dark lowercase">split</button><button onclick="stop()" class="btn btn-danger lowercase">stop</button>` :
                                 `<button onclick="start()" class="btn btn-primary lowercase">start</button><button onclick="setView('recall')" class="btn btn-dark lowercase">recall</button>`
                             }
                         </div>
@@ -735,7 +785,7 @@
                         ${appState.sessions.map(s => `<div onclick="detail(${s.id})" class="p-4 bg-zinc-950 border border-zinc-900 rounded-2xl flex justify-between items-center active:bg-zinc-900">
                             <div>
                                 <div class="text-sm font-bold text-zinc-200">${s.name}</div>
-                                <div class="text-[9px] text-zinc-400 font-bold uppercase mt-1">${new Date(s.date).toLocaleDateString()}${s.distance ? ` · ${formatDistance(s.distance)}` : ''}</div>
+                                <div class="text-[9px] text-zinc-400 font-bold uppercase mt-1 font-mono">${new Date(s.date).toLocaleDateString()} ${new Date(s.date).toLocaleTimeString('en-GB', { hour12: false })}${s.distance ? ` · ${formatDistance(s.distance)}` : ''}</div>
                             </div>
                             <div class="text-right">
                                 <div class="text-xl font-bold text-yellow-300 font-mono">${s.avgRate.toFixed(1)}</div>
