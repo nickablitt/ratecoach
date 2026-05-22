@@ -220,10 +220,7 @@
         });
 
         const startGPS = () => {
-            if (gpsWatchId != null) {
-                navigator.geolocation.clearWatch(gpsWatchId);
-                gpsWatchId = null;
-            }
+            if (gpsWatchId != null) return; // already warming
             if (!('geolocation' in navigator)) {
                 appState.active.gpsStatus = 'unavailable';
                 return;
@@ -234,6 +231,9 @@
                 (pos) => {
                     const a = appState.active;
                     const c = pos.coords;
+                    a.gpsAccuracy = c.accuracy;
+                    a.gpsStatus = 'active';
+
                     const fix = {
                         time: a.total,
                         lat: c.latitude,
@@ -242,32 +242,35 @@
                         speed: c.speed == null ? null : c.speed,
                         heading: c.heading == null ? null : c.heading
                     };
-                    a.gps.push(fix);
-                    a.gpsAccuracy = c.accuracy;
-                    a.gpsStatus = 'active';
 
                     // distance & pace — only count fixes with decent accuracy
                     if (c.accuracy <= GPS_GOOD_ACCURACY) {
-                        if (lastGoodFix) {
+                        if (a.recording && lastGoodFix) {
                             const d = haversine(lastGoodFix, fix);
-                            // reject teleports (likely from a bad prior fix)
-                            if (d < GPS_MAX_JUMP) {
-                                a.distance += d;
-                            }
+                            if (d < GPS_MAX_JUMP) a.distance += d;
                         }
-                        lastGoodFix = fix;
+                        lastGoodFix = fix; // track in both states so distance starts from current pos
                     }
-                    // pace from speed (smoothed)
-                    if (c.speed != null && c.speed > 0.3) {
-                        const instPace = 500 / c.speed; // s per 500m
-                        a.pace = a.pace > 0 ? a.pace * (1 - PACE_SMOOTHING) + instPace * PACE_SMOOTHING : instPace;
-                    } else if (c.speed != null && c.speed <= 0.3) {
-                        a.pace = 0;
+                    // pace from speed (smoothed) — only while recording
+                    if (a.recording) {
+                        if (c.speed != null && c.speed > 0.3) {
+                            const instPace = 500 / c.speed;
+                            a.pace = a.pace > 0 ? a.pace * (1 - PACE_SMOOTHING) + instPace * PACE_SMOOTHING : instPace;
+                        } else if (c.speed != null && c.speed <= 0.3) {
+                            a.pace = 0;
+                        }
+                        a.gps.push(fix);
                     }
+
+                    // keep the on-screen badge in sync while warming
+                    const gpsEl = document.getElementById('gps-display');
+                    if (gpsEl) gpsEl.textContent = gpsDisplayText(a);
                 },
                 (err) => {
                     if (err.code === err.PERMISSION_DENIED) appState.active.gpsStatus = 'denied';
                     else appState.active.gpsStatus = 'unavailable';
+                    const gpsEl = document.getElementById('gps-display');
+                    if (gpsEl) gpsEl.textContent = gpsDisplayText(appState.active);
                     console.warn('gps error', err);
                 },
                 { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 }
@@ -282,6 +285,15 @@
             appState.active.gpsStatus = 'inactive';
             appState.active.gpsAccuracy = null;
             lastGoodFix = null;
+        };
+
+        const syncGPSToView = () => {
+            const needGPS = appState.view === 'main' || appState.view === 'save' || appState.active.recording;
+            if (needGPS && gpsWatchId == null) {
+                startGPS();
+            } else if (!needGPS && gpsWatchId != null && !appState.active.recording) {
+                stopGPS();
+            }
         };
 
         const formatPace = (s) => {
@@ -572,7 +584,10 @@
 
         const resetSession = () => {
             clearInterval(appState.interval);
-            appState.active = { ...appState.active, recording: false, total: 0, lapStart: 0, rate: 0, logs: [], splits: [], gps: [], distance: 0, pace: 0, gpsAccuracy: null, gpsStatus: 'inactive' };
+            // preserve gpsAccuracy/gpsStatus across sessions so the warm fix stays visible
+            const keptAcc = appState.active.gpsAccuracy;
+            const keptStatus = appState.active.gpsStatus;
+            appState.active = { ...appState.active, recording: false, total: 0, lapStart: 0, rate: 0, logs: [], splits: [], gps: [], distance: 0, pace: 0, gpsAccuracy: keptAcc, gpsStatus: keptStatus };
             appState.lastTap = null;
         };
 
@@ -582,7 +597,7 @@
             const now = Date.now();
             appState.active.start = now;
             acquireWakeLock();
-            startGPS();
+            startGPS(); // no-op if already warming — uses the existing watch
             render();
 
             appState.interval = setInterval(() => {
@@ -602,8 +617,8 @@
 
         const stop = () => {
             clearInterval(appState.interval);
-            stopGPS();
             releaseWakeLock();
+            // leave GPS running — it keeps warming for the next session if we stay on main
             appState.active.recording = false;
             appState.view = appState.active.logs.length > 0 ? 'save' : 'main';
             render();
@@ -617,6 +632,11 @@
             if (a.gpsAccuracy < 10) return `gps ${Math.round(a.gpsAccuracy)}m ●●●`;
             if (a.gpsAccuracy < 30) return `gps ${Math.round(a.gpsAccuracy)}m ●●○`;
             return `gps ${Math.round(a.gpsAccuracy)}m ●○○`;
+        };
+
+        const gpsDisplayText = (a) => {
+            if (!a.recording && a.gpsStatus === 'inactive') return 'press start to begin';
+            return gpsLabel(a);
         };
 
         const tap = () => {
@@ -642,6 +662,7 @@
 
         // --- render ---
         const render = () => {
+            syncGPSToView();
             const ui = document.getElementById('app-window');
             ui.innerHTML = '';
 
@@ -681,7 +702,7 @@
                                 <div id="pace-display" class="text-base font-bold text-yellow-300">${formatPace(a.pace)}</div>
                             </div>
                         </div>
-                        <p id="gps-display" class="text-[10px] text-zinc-300 mt-6 lowercase font-mono">${a.recording ? gpsLabel(a) : 'press start to begin'}</p>
+                        <p id="gps-display" class="text-[10px] text-zinc-300 mt-6 lowercase font-mono">${gpsDisplayText(a)}</p>
                     </div>
 
                     <div class="flex flex-col gap-4 mt-4">
