@@ -16,6 +16,7 @@
     <link rel="apple-touch-icon" href="./icon-192.png">
 
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@700&family=Inter:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -149,23 +150,270 @@
                 splits: appState.active.splits
             };
             const tx = db.transaction("sessions", "readwrite");
-            tx.objectStore("sessions").add(session);
+            const req = tx.objectStore("sessions").add(session);
+            req.onsuccess = (e) => { session.id = e.target.result; };
             tx.oncomplete = () => {
                 loadSessions();
                 resetSession();
                 appState.view = 'main';
                 render();
+                if (cloud.connected && session.id) {
+                    cloudUploadSession(session)
+                        .then(fileId => { if (fileId) attachDriveId(session.id, fileId); })
+                        .catch(err => console.error('cloud upload failed', err));
+                }
             };
         };
 
         const deleteFromDB = (id) => {
+            const sess = appState.sessions.find(x => x.id === id);
+            const driveFileId = sess && sess.driveFileId;
             const tx = db.transaction("sessions", "readwrite");
             tx.objectStore("sessions").delete(id);
             tx.oncomplete = () => {
                 loadSessions();
                 appState.view = 'recall';
                 render();
+                if (cloud.connected && driveFileId) {
+                    cloudDeleteSession(driveFileId).catch(err => console.error('cloud delete failed', err));
+                }
             };
+        };
+
+        // --- csv export ---
+        const csvEscape = (v) => {
+            if (v == null) return '';
+            const s = String(v);
+            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+        };
+
+        const sessionToCSV = (s) => {
+            const lines = [
+                `# name,${csvEscape(s.name)}`,
+                `# date,${s.date}`,
+                `# total_ms,${s.total}`,
+                `# avg_rate,${s.avgRate}`,
+                'type,time_ms,rate_spm,split_index'
+            ];
+            const items = [];
+            (s.logs || []).forEach(l => items.push({ type: 'rate', time: l.time, rate: l.rate }));
+            (s.splits || []).forEach((t, i) => items.push({ type: 'split', time: t, idx: i + 1 }));
+            items.sort((a, b) => a.time - b.time);
+            items.forEach(it => {
+                if (it.type === 'rate') lines.push(`rate,${it.time},${it.rate},`);
+                else lines.push(`split,${it.time},,${it.idx}`);
+            });
+            return lines.join('\n');
+        };
+
+        const downloadSessionCSV = (s) => {
+            const csv = sessionToCSV(s);
+            const safeName = (s.name || 'session').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+            const datePart = (s.date || new Date().toISOString()).slice(0, 10);
+            const fileName = `ratecoach-${datePart}-${safeName}.csv`;
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = fileName;
+            document.body.appendChild(a); a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
+
+        // --- google drive sync ---
+        // *** REPLACE THIS WITH YOUR OAUTH 2.0 WEB CLIENT ID FROM GOOGLE CLOUD CONSOLE ***
+        const DRIVE_CLIENT_ID = 'YOUR_CLIENT_ID_HERE.apps.googleusercontent.com';
+        const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive.file';
+        const DRIVE_FOLDER_NAME = 'ratecoach';
+        const cloudEnabled = !DRIVE_CLIENT_ID.includes('YOUR_CLIENT_ID');
+
+        let cloud = {
+            tokenClient: null,
+            token: null,
+            expiresAt: 0,
+            folderId: null,
+            connected: false,
+            busy: false
+        };
+
+        const cloudInit = () => {
+            if (!cloudEnabled) return;
+            if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
+                setTimeout(cloudInit, 250);
+                return;
+            }
+            cloud.tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: DRIVE_CLIENT_ID,
+                scope: DRIVE_SCOPES,
+                callback: (res) => {
+                    if (res && res.access_token) {
+                        cloud.token = res.access_token;
+                        cloud.expiresAt = Date.now() + (res.expires_in - 60) * 1000;
+                        cloud.connected = true;
+                        localStorage.setItem('rc_drive_connected', '1');
+                        render();
+                        cloudPullAll().catch(e => console.error('pull failed', e));
+                    }
+                },
+                error_callback: (e) => { console.warn('drive auth error', e); }
+            });
+            if (localStorage.getItem('rc_drive_connected') === '1') {
+                cloud.tokenClient.requestAccessToken({ prompt: '' });
+            }
+        };
+
+        const cloudConnect = () => {
+            if (!cloud.tokenClient) return;
+            cloud.tokenClient.requestAccessToken({ prompt: 'consent' });
+        };
+
+        const cloudDisconnect = () => {
+            if (cloud.token && google && google.accounts && google.accounts.oauth2) {
+                try { google.accounts.oauth2.revoke(cloud.token, () => {}); } catch {}
+            }
+            cloud = { tokenClient: cloud.tokenClient, token: null, expiresAt: 0, folderId: null, connected: false, busy: false };
+            localStorage.removeItem('rc_drive_connected');
+            render();
+        };
+
+        const refreshTokenIfNeeded = () => new Promise((resolve, reject) => {
+            if (Date.now() < cloud.expiresAt) return resolve();
+            const prevCb = cloud.tokenClient.callback;
+            cloud.tokenClient.callback = (r) => {
+                cloud.tokenClient.callback = prevCb;
+                if (r && r.access_token) {
+                    cloud.token = r.access_token;
+                    cloud.expiresAt = Date.now() + (r.expires_in - 60) * 1000;
+                    resolve();
+                } else reject(new Error('token refresh failed'));
+            };
+            cloud.tokenClient.requestAccessToken({ prompt: '' });
+        });
+
+        const driveFetch = async (url, opts = {}) => {
+            await refreshTokenIfNeeded();
+            const headers = { ...(opts.headers || {}), 'Authorization': `Bearer ${cloud.token}` };
+            return fetch(url, { ...opts, headers });
+        };
+
+        const ensureDriveFolder = async () => {
+            if (cloud.folderId) return cloud.folderId;
+            const q = `mimeType='application/vnd.google-apps.folder' and name='${DRIVE_FOLDER_NAME}' and trashed=false`;
+            const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`);
+            const data = await r.json();
+            if (data.files && data.files.length > 0) { cloud.folderId = data.files[0].id; return cloud.folderId; }
+            const cr = await driveFetch('https://www.googleapis.com/drive/v3/files', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' })
+            });
+            const cd = await cr.json();
+            cloud.folderId = cd.id;
+            return cloud.folderId;
+        };
+
+        const driveMultipartBody = (metadata, csvText) => {
+            const boundary = 'rcboundary' + Math.random().toString(36).slice(2);
+            const body =
+                `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+                `--${boundary}\r\nContent-Type: text/csv; charset=UTF-8\r\n\r\n${csvText}\r\n--${boundary}--`;
+            return { body, contentType: `multipart/related; boundary=${boundary}` };
+        };
+
+        const cloudUploadSession = async (s) => {
+            if (!cloud.connected) return null;
+            const folderId = await ensureDriveFolder();
+            const csv = sessionToCSV(s);
+            const safeName = (s.name || 'session').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+            const datePart = (s.date || new Date().toISOString()).slice(0, 10);
+            const fileName = `ratecoach-${datePart}-${safeName}.csv`;
+            if (s.driveFileId) {
+                const { body, contentType } = driveMultipartBody({ name: fileName }, csv);
+                const r = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${s.driveFileId}?uploadType=multipart`, {
+                    method: 'PATCH', headers: { 'Content-Type': contentType }, body
+                });
+                return r.ok ? s.driveFileId : null;
+            }
+            const metadata = { name: fileName, mimeType: 'text/csv', parents: [folderId], appProperties: { ratecoachSessionId: String(s.id) } };
+            const { body, contentType } = driveMultipartBody(metadata, csv);
+            const r = await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+                method: 'POST', headers: { 'Content-Type': contentType }, body
+            });
+            if (!r.ok) return null;
+            const data = await r.json();
+            return data.id;
+        };
+
+        const cloudDeleteSession = async (driveFileId) => {
+            if (!cloud.connected || !driveFileId) return;
+            await driveFetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, { method: 'DELETE' });
+        };
+
+        const csvParse = (text) => {
+            const meta = {};
+            const lines = text.split(/\r?\n/);
+            let dataStart = lines.length;
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].startsWith('# ')) {
+                    const m = lines[i].slice(2).match(/^([^,]+),(.*)$/);
+                    if (m) meta[m[1].trim()] = m[2];
+                } else if (lines[i].startsWith('type,')) { dataStart = i + 1; break; }
+            }
+            const logs = [], splits = [];
+            for (let i = dataStart; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                const cols = line.split(',');
+                if (cols[0] === 'rate') logs.push({ rate: parseFloat(cols[2]), time: parseInt(cols[1]) });
+                else if (cols[0] === 'split') splits.push(parseInt(cols[1]));
+            }
+            return {
+                name: meta.name || 'imported',
+                date: meta.date || new Date().toISOString(),
+                total: parseInt(meta.total_ms) || 0,
+                avgRate: parseFloat(meta.avg_rate) || 0,
+                logs, splits
+            };
+        };
+
+        const cloudPullAll = async () => {
+            if (!cloud.connected) return;
+            cloud.busy = true; render();
+            try {
+                const folderId = await ensureDriveFolder();
+                const q = `'${folderId}' in parents and trashed=false and mimeType='text/csv'`;
+                const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime)&pageSize=1000`);
+                const data = await r.json();
+                const files = data.files || [];
+                const existing = new Set(appState.sessions.map(s => s.driveFileId).filter(Boolean));
+                for (const f of files) {
+                    if (existing.has(f.id)) continue;
+                    const cr = await driveFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`);
+                    const text = await cr.text();
+                    const parsed = csvParse(text);
+                    parsed.driveFileId = f.id;
+                    await new Promise((resolve, reject) => {
+                        const tx = db.transaction("sessions", "readwrite");
+                        tx.objectStore("sessions").add(parsed);
+                        tx.oncomplete = resolve;
+                        tx.onerror = reject;
+                    });
+                }
+                loadSessions();
+            } catch (e) {
+                console.error('pull error', e);
+            }
+            cloud.busy = false; render();
+        };
+
+        const attachDriveId = (sessionId, fileId) => {
+            const tx = db.transaction("sessions", "readwrite");
+            const store = tx.objectStore("sessions");
+            store.get(sessionId).onsuccess = (e) => {
+                const rec = e.target.result;
+                if (rec) { rec.driveFileId = fileId; store.put(rec); }
+            };
+            tx.oncomplete = () => loadSessions();
         };
 
         // --- logic ---
@@ -281,8 +529,12 @@
             }
 
             if (appState.view === 'recall') {
+                const cloudBtn = cloudEnabled ? `<button onclick="${cloud.connected ? 'cloudDisconnect()' : 'cloudConnect()'}" class="text-[10px] font-bold lowercase tracking-widest ${cloud.connected ? 'text-yellow-300' : 'text-zinc-500'}">${cloud.busy ? 'syncing...' : (cloud.connected ? 'drive ●' : 'drive ○')}</button>` : '';
                 ui.innerHTML = `<div class="flex flex-col h-full p-6">
-                    <h2 class="text-yellow-300 text-xs font-bold tracking-widest lowercase border-b border-zinc-900 pb-3 mb-6">recorded sessions</h2>
+                    <div class="flex justify-between items-center border-b border-zinc-900 pb-3 mb-6">
+                        <h2 class="text-yellow-300 text-xs font-bold tracking-widest lowercase">recorded sessions</h2>
+                        ${cloudBtn}
+                    </div>
                     <div class="flex-grow overflow-y-auto custom-scroll space-y-2">
                         ${appState.sessions.length === 0 ? '<div class="h-full flex items-center justify-center text-zinc-300 text-xs lowercase italic">no logs found</div>' : ''}
                         ${appState.sessions.map(s => `<div onclick="detail(${s.id})" class="p-4 bg-zinc-950 border border-zinc-900 rounded-2xl flex justify-between items-center active:bg-zinc-900">
@@ -344,8 +596,9 @@
                             </div>
                         </div>
                     </div>
-                    <div class="mt-6 grid grid-cols-2 gap-3">
+                    <div class="mt-6 grid grid-cols-3 gap-3">
                         <button onclick="setView('recall')" class="btn btn-dark lowercase">back</button>
+                        <button onclick="exportCSV()" class="btn btn-dark lowercase">export</button>
                         <button onclick="del(${s.id})" class="btn btn-danger lowercase text-sm">delete</button>
                     </div>
                 </div>`;
@@ -483,6 +736,10 @@
         window.setView = (v) => { appState.view = v; render(); };
         window.setMult = (n) => { appState.active.multiplier = n; appState.lastTap = null; render(); };
         window.setFilter = (f) => { appState.detailFilter = f; render(); };
+        window.exportCSV = () => { if (appState.selected) downloadSessionCSV(appState.selected); };
+        window.cloudConnect = cloudConnect;
+        window.cloudDisconnect = cloudDisconnect;
+        window.cloudPullAll = cloudPullAll;
         window.selectLog = (type, time) => {
             const c = appState.selectedLog;
             appState.selectedLog = (c && c.type === type && c.time === time) ? null : { type, time };
@@ -493,6 +750,7 @@
         window.start = start; window.stop = stop; window.split = split;
 
         initDB();
+        cloudInit();
         render();
     </script>
 </body>
