@@ -21,9 +21,9 @@
         :root {
             --bg: #000000;
             --surface: #0a0a0a;
-            --accent: #22d3ee;
+            --accent: #fde047;
             --text: #ffffff;
-            --text-dim: #52525b;
+            --text-dim: #a1a1aa;
         }
         body {
             background-color: var(--bg);
@@ -64,10 +64,10 @@
             transition: background-color 0.05s, transform 0.05s;
         }
         .main-tap-zone:active {
-            background-color: #0f172a;
+            background-color: #1a1505;
             transform: scale(0.99);
         }
-        .main-tap-zone.recording { border-color: #164e63; }
+        .main-tap-zone.recording { border-color: #713f12; }
 
         .btn {
             padding: 1.25rem;
@@ -229,9 +229,9 @@
             ui.innerHTML = '';
 
             if (appState.view === 'splash') {
-                ui.innerHTML = `<div class="flex flex-col items-center justify-center h-full text-cyan-400 font-mono">
+                ui.innerHTML = `<div class="flex flex-col items-center justify-center h-full text-yellow-300 font-mono">
                     <h1 class="text-4xl font-bold lowercase tracking-tighter animate-pulse">rate coach</h1>
-                    <p class="text-[10px] text-zinc-700 mt-2 lowercase">ablitt & jenkin 2026</p>
+                    <p class="text-[10px] text-zinc-500 mt-2 lowercase">ablitt & jenkin 2026</p>
                 </div>`;
                 setTimeout(() => { if(appState.view === 'splash'){appState.view = 'main'; render();} }, 1500);
                 return;
@@ -242,28 +242,28 @@
                 ui.innerHTML = `<div class="flex flex-col h-full p-6">
                     <div class="flex justify-between items-start mb-4">
                         <div class="flex flex-col">
-                            <span class="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">spm</span>
-                            <div class="text-7xl font-bold text-cyan-400 font-mono tracking-tighter">
+                            <span class="text-[10px] text-zinc-300 font-bold uppercase tracking-widest mb-1">spm</span>
+                            <div class="text-7xl font-bold text-yellow-300 font-mono tracking-tighter">
                                 ${a.rate > 0 ? a.rate.toFixed(1) : "0.0"}
                             </div>
                         </div>
                         <div class="text-right">
-                            <span class="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mb-1">lap</span>
+                            <span class="text-[10px] text-zinc-300 font-bold uppercase tracking-widest mb-1">lap</span>
                             <div id="lap-timer-display" class="text-2xl text-white font-mono font-bold">${format(a.total - a.lapStart)}</div>
                         </div>
                     </div>
 
                     <div id="tap-target" class="main-tap-zone ${a.recording ? 'recording' : ''}">
-                        <span class="text-[10px] text-zinc-600 font-bold uppercase tracking-widest mb-4">total session time</span>
+                        <span class="text-[10px] text-zinc-400 font-bold uppercase tracking-widest mb-4">total session time</span>
                         <div id="total-timer-display" class="text-6xl font-bold text-white font-mono tracking-tighter">${format(a.total)}</div>
-                        <p class="text-[10px] text-zinc-800 mt-8 lowercase">${a.recording ? `sample: every ${a.multiplier} strokes` : 'press start to begin'}</p>
+                        <p class="text-[10px] text-zinc-300 mt-8 lowercase">${a.recording ? `sample: every ${a.multiplier} strokes` : 'press start to begin'}</p>
                     </div>
 
                     <div class="flex flex-col gap-4 mt-4">
                         <div class="flex justify-between items-center bg-zinc-950 p-2 rounded-2xl border border-zinc-900">
-                            <span class="text-[9px] text-zinc-500 px-3 font-bold uppercase">strokes per tap</span>
+                            <span class="text-[9px] text-zinc-300 px-3 font-bold uppercase">strokes per tap</span>
                             <div class="flex gap-1">
-                                ${[1, 2, 3].map(n => `<button onclick="setMult(${n})" ${a.recording?'disabled':''} class="w-12 h-12 rounded-xl text-sm font-bold transition-colors ${a.multiplier===n?'bg-cyan-500 text-black':'bg-zinc-900 text-zinc-500'}">${n}</button>`).join('')}
+                                ${[1, 2, 3].map(n => `<button onclick="setMult(${n})" ${a.recording?'disabled':''} class="w-12 h-12 rounded-xl text-sm font-bold transition-colors ${a.multiplier===n?'bg-yellow-300 text-black':'bg-zinc-900 text-zinc-300'}">${n}</button>`).join('')}
                             </div>
                         </div>
                         <div class="grid grid-cols-2 gap-3">
@@ -279,17 +279,17 @@
 
             if (appState.view === 'recall') {
                 ui.innerHTML = `<div class="flex flex-col h-full p-6">
-                    <h2 class="text-cyan-400 text-xs font-bold tracking-widest lowercase border-b border-zinc-900 pb-3 mb-6">recorded sessions</h2>
+                    <h2 class="text-yellow-300 text-xs font-bold tracking-widest lowercase border-b border-zinc-900 pb-3 mb-6">recorded sessions</h2>
                     <div class="flex-grow overflow-y-auto custom-scroll space-y-2">
-                        ${appState.sessions.length === 0 ? '<div class="h-full flex items-center justify-center text-zinc-800 text-xs lowercase italic">no logs found</div>' : ''}
+                        ${appState.sessions.length === 0 ? '<div class="h-full flex items-center justify-center text-zinc-300 text-xs lowercase italic">no logs found</div>' : ''}
                         ${appState.sessions.map(s => `<div onclick="detail(${s.id})" class="p-4 bg-zinc-950 border border-zinc-900 rounded-2xl flex justify-between items-center active:bg-zinc-900">
                             <div>
                                 <div class="text-sm font-bold text-zinc-200">${s.name}</div>
-                                <div class="text-[9px] text-zinc-600 font-bold uppercase mt-1">${new Date(s.date).toLocaleDateString()}</div>
+                                <div class="text-[9px] text-zinc-400 font-bold uppercase mt-1">${new Date(s.date).toLocaleDateString()}</div>
                             </div>
                             <div class="text-right">
-                                <div class="text-xl font-bold text-cyan-400 font-mono">${s.avgRate.toFixed(1)}</div>
-                                <div class="text-[8px] text-zinc-700 font-bold uppercase">avg spm</div>
+                                <div class="text-xl font-bold text-yellow-300 font-mono">${s.avgRate.toFixed(1)}</div>
+                                <div class="text-[8px] text-zinc-500 font-bold uppercase">avg spm</div>
                             </div>
                         </div>`).join('')}
                     </div>
@@ -300,24 +300,24 @@
             if (appState.view === 'detail' && appState.selected) {
                 const s = appState.selected;
                 ui.innerHTML = `<div class="flex flex-col h-full p-6">
-                    <h2 class="text-cyan-400 text-xs font-bold tracking-widest lowercase border-b border-zinc-900 pb-3 mb-6">session analysis</h2>
+                    <h2 class="text-yellow-300 text-xs font-bold tracking-widest lowercase border-b border-zinc-900 pb-3 mb-6">session analysis</h2>
                     <div class="flex-grow overflow-y-auto custom-scroll space-y-6">
                         <div class="grid grid-cols-2 gap-3">
                             <div class="bg-zinc-950 p-4 rounded-2xl border border-zinc-900">
-                                <span class="text-[9px] text-zinc-600 font-bold uppercase block mb-1">duration</span>
+                                <span class="text-[9px] text-zinc-400 font-bold uppercase block mb-1">duration</span>
                                 <span class="text-xl font-bold text-white font-mono">${format(s.total)}</span>
                             </div>
                             <div class="bg-zinc-950 p-4 rounded-2xl border border-zinc-900">
-                                <span class="text-[9px] text-zinc-600 font-bold uppercase block mb-1">avg rate</span>
-                                <span class="text-xl font-bold text-cyan-400 font-mono">${s.avgRate.toFixed(1)}</span>
+                                <span class="text-[9px] text-zinc-400 font-bold uppercase block mb-1">avg rate</span>
+                                <span class="text-xl font-bold text-yellow-300 font-mono">${s.avgRate.toFixed(1)}</span>
                             </div>
                         </div>
                         <canvas id="chart" class="w-full h-44 bg-black rounded-2xl border border-zinc-900"></canvas>
                         <div>
-                            <span class="text-[10px] text-zinc-600 font-bold uppercase block mb-3 tracking-widest">split markers</span>
+                            <span class="text-[10px] text-zinc-400 font-bold uppercase block mb-3 tracking-widest">split markers</span>
                             <div class="space-y-1">
-                                ${s.splits.map((t, i) => `<div class="flex justify-between text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-zinc-600 lowercase">marker ${i+1}</span><span class="text-white">${format(t)}</span></div>`).join('')}
-                                ${s.splits.length === 0 ? '<span class="text-zinc-800 italic text-[10px] lowercase">no splits marked</span>' : ''}
+                                ${s.splits.map((t, i) => `<div class="flex justify-between text-[11px] font-mono border-b border-zinc-900 py-2"><span class="text-zinc-400 lowercase">marker ${i+1}</span><span class="text-white">${format(t)}</span></div>`).join('')}
+                                ${s.splits.length === 0 ? '<span class="text-zinc-300 italic text-[10px] lowercase">no splits marked</span>' : ''}
                             </div>
                         </div>
                     </div>
@@ -331,12 +331,12 @@
 
             if (appState.view === 'save') {
                 ui.innerHTML = `<div class="flex flex-col h-full p-8 items-center justify-center text-center">
-                    <div class="w-20 h-20 bg-cyan-950/20 rounded-full flex items-center justify-center mb-8 border border-cyan-900/20">
-                        <svg class="w-10 h-10 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                    <div class="w-20 h-20 bg-yellow-950/20 rounded-full flex items-center justify-center mb-8 border border-yellow-900/20">
+                        <svg class="w-10 h-10 text-yellow-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
                     </div>
                     <h2 class="text-white text-2xl font-bold lowercase mb-2">session ended</h2>
-                    <p class="text-zinc-600 text-xs mb-10 lowercase">enter a name to save this log</p>
-                    <input id="session-name" type="text" class="w-full bg-zinc-950 border border-zinc-800 rounded-2xl p-5 text-white text-center text-xl font-bold mb-8 focus:border-cyan-500 outline-none" placeholder="session name">
+                    <p class="text-zinc-400 text-xs mb-10 lowercase">enter a name to save this log</p>
+                    <input id="session-name" type="text" class="w-full bg-zinc-950 border border-zinc-800 rounded-2xl p-5 text-white text-center text-xl font-bold mb-8 focus:border-yellow-300 outline-none" placeholder="session name">
                     <div class="grid grid-cols-2 gap-3 w-full">
                         <button onclick="setView('main')" class="btn btn-dark lowercase">discard</button>
                         <button onclick="saveToDB(document.getElementById('session-name').value)" class="btn btn-primary lowercase">save</button>
@@ -366,7 +366,7 @@
             s.splits.forEach(t => { ctx.beginPath(); ctx.moveTo(getX(t), p); ctx.lineTo(getX(t), h - p); ctx.stroke(); });
             ctx.strokeStyle = '#111';
             [0, 0.5, 1].forEach(v => { const y = p + v*(h-p*2); ctx.beginPath(); ctx.moveTo(p, y); ctx.lineTo(w-p, y); ctx.stroke(); });
-            ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 2;
+            ctx.strokeStyle = '#fde047'; ctx.lineWidth = 2;
             ctx.beginPath();
             s.logs.forEach((l, i) => { if(i===0) ctx.moveTo(getX(l.time), getY(l.rate)); else ctx.lineTo(getX(l.time), getY(l.rate)); });
             ctx.stroke();
